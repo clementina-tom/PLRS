@@ -6,7 +6,7 @@ import pandas as pd
 import networkx as nx
 import numpy as np
 from huggingface_hub import hf_hub_download
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 st.set_page_config(page_title='Logic Engine', page_icon='🧠', layout='wide')
 
@@ -29,7 +29,7 @@ def load_model():
             self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers, enable_nested_tensor=False)
             self.dropout = nn.Dropout(dropout)
             self.output = nn.Linear(embed_dim, 1)
-        def forward(self, interactions, target_skills, mask):
+        def forward(self, interactions, target_skills, mask, return_attention=False):
             batch_size, seq_len = interactions.shape
             positions = torch.arange(seq_len, device=interactions.device).unsqueeze(0).expand(batch_size, -1)
             x = self.interaction_embed(interactions)
@@ -80,20 +80,33 @@ class MasteryVector:
         return {'total_topics': len(self.mastery), 'mastered': len(mastered), 'mastery_rate': round(len(mastered)/len(self.mastery), 3), 'mastered_topics': mastered}
 
 class DAGConstraintLayer:
-    def __init__(self, graph, threshold=0.70):
+    def __init__(self, graph, threshold=0.70, soft_threshold=0.50):
         self.graph = graph
         self.threshold = threshold
+        self.soft_threshold = soft_threshold  # below full threshold but above this = challenging
     def validate(self, topic_id, mastery_vector):
-        if topic_id not in self.graph.nodes: return False, 'Topic not found.'
+        if topic_id not in self.graph.nodes: return 'vetoed', 'Topic not found.'
         prerequisites = list(self.graph.predecessors(topic_id))
         label = self.graph.nodes[topic_id].get('label', topic_id)
-        if not prerequisites: return True, f'✅ Foundational topic — no prerequisites.'
-        unmastered = [(self.graph.nodes[p].get('label',p), mastery_vector.get_mastery(p)) for p in prerequisites if not mastery_vector.is_mastered(p)]
-        if unmastered:
-            gaps = ', '.join([f"{lbl} ({m:.0%} mastered, need {self.threshold:.0%})" for lbl,m in unmastered])
-            return False, f'❌ Prerequisites not met: {gaps}'
-        prereq_labels = [self.graph.nodes[p].get('label',p) for p in prerequisites]
-        return True, f'✅ Prerequisites mastered: {", ".join(prereq_labels)}'
+        if not prerequisites: return 'approved', f'✅ Foundational topic — no prerequisites.'
+        hard_fails = []
+        soft_fails = []
+        for p in prerequisites:
+            m = mastery_vector.get_mastery(p)
+            plabel = self.graph.nodes[p].get('label', p)
+            if m < self.soft_threshold:
+                hard_fails.append((plabel, m))
+            elif m < self.threshold:
+                soft_fails.append((plabel, m))
+        if hard_fails:
+            gaps = ', '.join([f"{l} ({m:.0%} mastered, need {self.threshold:.0%})" for l,m in hard_fails])
+            return 'vetoed', f'❌ Prerequisites not met: {gaps}'
+        elif soft_fails:
+            gaps = ', '.join([f"{l} ({m:.0%} mastered, need {self.threshold:.0%})" for l,m in soft_fails])
+            return 'challenging', f'⚠️ Challenging — prerequisites nearly met: {gaps}. Proceed with caution.'
+        else:
+            prereq_labels = [self.graph.nodes[p].get('label',p) for p in prerequisites]
+            return 'approved', f'✅ Prerequisites mastered: {", ".join(prereq_labels)}'
 
 class RankingFunction:
     def __init__(self, graph, threshold=0.70, w_gap=0.40, w_ready=0.35, w_downstream=0.25):
@@ -110,19 +123,27 @@ class RankingFunction:
         return round(self.w_gap*gap + self.w_ready*readiness + self.w_downstream*downstream, 3)
 
 class LearningRecommendationPipeline:
-    def __init__(self, graph, threshold=0.70, top_n=5):
-        self.graph=graph; self.constraint=DAGConstraintLayer(graph,threshold); self.ranker=RankingFunction(graph,threshold); self.top_n=top_n
+    def __init__(self, graph, threshold=0.70, soft_threshold=0.50, top_n=5):
+        self.graph=graph
+        self.constraint=DAGConstraintLayer(graph, threshold, soft_threshold)
+        self.ranker=RankingFunction(graph, threshold)
+        self.top_n=top_n
     def run(self, mastery_vector):
-        approved, vetoed = [], []
+        approved, challenging, vetoed = [], [], []
         for topic_id in self.graph.nodes:
-            is_approved, reasoning = self.constraint.validate(topic_id, mastery_vector)
-            entry = {'topic_id': topic_id, 'topic_label': self.graph.nodes[topic_id].get('label', topic_id), 'mastery': round(mastery_vector.get_mastery(topic_id),3), 'reasoning': reasoning, 'approved': is_approved}
-            if is_approved and not mastery_vector.is_mastered(topic_id):
+            status, reasoning = self.constraint.validate(topic_id, mastery_vector)
+            entry = {'topic_id': topic_id, 'topic_label': self.graph.nodes[topic_id].get('label', topic_id), 'mastery': round(mastery_vector.get_mastery(topic_id),3), 'reasoning': reasoning, 'status': status}
+            if status == 'approved' and not mastery_vector.is_mastered(topic_id):
                 entry['score'] = self.ranker.score(topic_id, mastery_vector)
                 approved.append(entry)
-            elif not is_approved: vetoed.append(entry)
+            elif status == 'challenging' and not mastery_vector.is_mastered(topic_id):
+                entry['score'] = self.ranker.score(topic_id, mastery_vector) * 0.8  # slight penalty
+                challenging.append(entry)
+            elif status == 'vetoed':
+                vetoed.append(entry)
         approved.sort(key=lambda x: x['score'], reverse=True)
-        return {'top_recommendations': approved[:self.top_n], 'total_approved': len(approved), 'total_vetoed': len(vetoed), 'vetoed_sample': vetoed[:5], 'prerequisite_violation_rate': round(len(vetoed)/max(len(list(self.graph.nodes)),1),3)}
+        challenging.sort(key=lambda x: x['score'], reverse=True)
+        return {'top_recommendations': approved[:self.top_n], 'challenging': challenging[:3], 'total_approved': len(approved), 'total_challenging': len(challenging), 'total_vetoed': len(vetoed), 'vetoed_sample': vetoed[:5], 'prerequisite_violation_rate': round(len(vetoed)/max(len(list(self.graph.nodes)),1),3)}
 
 ACTIVITY_TO_MATH = {'oucontent':'algebraic_expressions','forumng':'statistics_basic','homepage':'whole_numbers','subpage':'plane_shapes','resource':'indices','url':'number_bases','ouwiki':'proportion_variation','glossary':'algebraic_factorization','quiz':'quadratic_equations'}
 ACTIVITY_TO_CS   = {'oucontent':'programming_concepts','forumng':'ethics_technology','homepage':'computer_basics','subpage':'html_basics','resource':'networking_fundamentals','url':'internet_basics','ouwiki':'cloud_basics','glossary':'intro_databases','quiz':'python_basics'}
@@ -141,8 +162,8 @@ def run_sakt_inference(model, config, skill_seq, correct_seq, device):
     for skill_id,prob in zip(real_skills,real_probs): mastery[int(skill_id)]=float(prob)
     return mastery
 
-def build_mastery_vector(skill_probs, graph, skill_encoder_df, domain, threshold):
-    mv=MasteryVector(graph,threshold); mapping=ACTIVITY_TO_MATH if domain=='math' else ACTIVITY_TO_CS
+def build_mastery_vector(skill_probs, graph, skill_encoder_df, domain, threshold, soft_threshold):
+    mv=MasteryVector(graph, threshold); mapping=ACTIVITY_TO_MATH if domain=='math' else ACTIVITY_TO_CS
     topic_scores={}
     for skill_id,prob in skill_probs.items():
         row=skill_encoder_df[skill_encoder_df['skill_id']==skill_id]
@@ -153,6 +174,36 @@ def build_mastery_vector(skill_probs, graph, skill_encoder_df, domain, threshold
     for topic_id,score in topic_scores.items(): mv.update(topic_id,score)
     return mv
 
+def what_if_analysis(topic_id, graph):
+    unlocks = list(nx.descendants(graph, topic_id))
+    direct_unlocks = list(graph.successors(topic_id))
+    blocked_by = list(graph.predecessors(topic_id))
+    unlock_labels = [graph.nodes[n].get('label',n) for n in direct_unlocks]
+    all_unlock_labels = [graph.nodes[n].get('label',n) for n in unlocks]
+    blocked_labels = [graph.nodes[n].get('label',n) for n in blocked_by]
+    return {'direct_unlocks': unlock_labels, 'all_unlocks': all_unlock_labels, 'blocked_by': blocked_labels, 'total_unlocked': len(unlocks)}
+
+def get_attention_weights(model, config, skill_seq, correct_seq, device):
+    max_len=config['max_seq_len']; n_skills=config['num_skills']
+    if len(skill_seq)>max_len: skill_seq=skill_seq[-max_len:]; correct_seq=correct_seq[-max_len:]
+    interactions=[s+c*n_skills for s,c in zip(skill_seq[:-1],correct_seq[:-1])]
+    target_skills=skill_seq[1:]
+    seq_len=len(interactions); pad_len=max_len-seq_len
+    interactions=[0]*pad_len+interactions; target_skills=[0]*pad_len+target_skills; mask_list=[False]*pad_len+[True]*seq_len
+    interactions_t=torch.LongTensor([interactions]); target_t=torch.LongTensor([target_skills]); mask_t=torch.BoolTensor([mask_list])
+    attention_weights = []
+    def hook_fn(module, input, output):
+        if hasattr(module, 'self_attn'):
+            pass
+    with torch.no_grad():
+        positions=torch.arange(max_len).unsqueeze(0)
+        x=model.interaction_embed(interactions_t)+model.pos_embed(positions)
+        x=x*mask_t.unsqueeze(-1).float()
+        real_mask=mask_t.squeeze(0)
+        real_skills=target_skills[pad_len:]
+        real_probs=torch.sigmoid(model(interactions_t,target_t,mask_t)).squeeze(0)[real_mask].numpy()
+    return real_skills[-10:], real_probs[-10:], seq_len
+
 def main():
     model, config, device = load_model()
     math_graph, cs_graph  = load_knowledge_maps()
@@ -162,15 +213,17 @@ def main():
     st.markdown('---')
     st.sidebar.title('⚙️ Configuration')
     domain    = st.sidebar.selectbox('Select Domain', ['Mathematics', 'CS Fundamentals'])
-    threshold = st.sidebar.slider('Mastery Threshold', 0.50, 0.90, 0.70, 0.05)
+    threshold = st.sidebar.slider('Mastery Threshold', 0.50, 0.90, 0.70, 0.05, help='Minimum mastery to consider a topic fully mastered')
+    soft_threshold = st.sidebar.slider('Challenging Threshold', 0.30, 0.70, 0.50, 0.05, help='Topics above this but below mastery threshold are marked Challenging')
     top_n     = st.sidebar.slider('Top N Recommendations', 3, 10, 5)
     graph      = math_graph if domain=='Mathematics' else cs_graph
     domain_key = 'math'     if domain=='Mathematics' else 'cs'
-    pipeline   = LearningRecommendationPipeline(graph, threshold, top_n)
+    pipeline   = LearningRecommendationPipeline(graph, threshold, soft_threshold, top_n)
     st.sidebar.markdown('---')
     st.sidebar.markdown('**About**')
-    st.sidebar.markdown('SAKT-based knowledge tracing with DAG prerequisite constraints.')
-    tab1, tab2, tab3 = st.tabs(['🎯 Get Recommendations','🗺️ Knowledge Map','📊 Diagnostics'])
+    st.sidebar.markdown('SAKT-based knowledge tracing with DAG prerequisite constraints. Three-tier recommendations: ✅ Approved, ⚠️ Challenging, ❌ Vetoed.')
+    tab1, tab2, tab3, tab4 = st.tabs(['🎯 Recommendations','🔍 What-If Simulator','🗺️ Knowledge Map','📊 Diagnostics'])
+
     with tab1:
         st.header('Learner Profile')
         mode = st.radio('Input Mode', ['Manual Mastery Input','Simulate Student Sequence'], horizontal=True)
@@ -189,30 +242,75 @@ def main():
             sim_skills=np.random.randint(0,config['num_skills'],seq_length).tolist()
             sim_corrects=np.random.randint(0,2,seq_length).tolist()
             skill_probs=run_sakt_inference(model,config,sim_skills,sim_corrects,device)
-            mastery_vector=build_mastery_vector(skill_probs,graph,skill_encoder,domain_key,threshold)
+            mastery_vector=build_mastery_vector(skill_probs,graph,skill_encoder,domain_key,threshold,soft_threshold)
             st.success(f'SAKT inference complete — {len(skill_probs)} skill predictions generated')
+            real_skills, real_probs, seq_len = get_attention_weights(model,config,sim_skills,sim_corrects,device)
+            if len(real_probs) > 0:
+                st.markdown('**📈 SAKT Mastery Signal (last 10 interactions):**')
+                attn_df = pd.DataFrame({'Interaction Step': [f'Step {seq_len-len(real_probs)+i+1}' for i in range(len(real_probs))], 'Predicted Mastery': [round(float(p),3) for p in real_probs]})
+                st.bar_chart(attn_df.set_index('Interaction Step'))
         if st.button('🚀 Generate Recommendations', type='primary'):
             output=pipeline.run(mastery_vector)
             summary=mastery_vector.get_mastery_summary()
-            col1,col2,col3,col4=st.columns(4)
+            col1,col2,col3,col4,col5=st.columns(5)
             col1.metric('Topics Mastered',f"{summary['mastered']} / {summary['total_topics']}")
             col2.metric('Mastery Rate',f"{summary['mastery_rate']:.1%}")
-            col3.metric('Approved Topics',output['total_approved'])
-            col4.metric('Violation Rate',f"{output['prerequisite_violation_rate']:.1%}")
+            col3.metric('✅ Approved',output['total_approved'])
+            col4.metric('⚠️ Challenging',output['total_challenging'])
+            col5.metric('Violation Rate',f"{output['prerequisite_violation_rate']:.1%}")
             st.markdown('---')
-            st.subheader(f'Top {top_n} Recommendations')
-            if not output['top_recommendations']: st.warning('No recommendations — adjust mastery or lower threshold.')
+            st.subheader(f'✅ Top {top_n} Approved Recommendations')
+            if not output['top_recommendations']: st.warning('No approved recommendations — adjust mastery or lower threshold.')
             else:
                 for i,rec in enumerate(output['top_recommendations'],1):
                     with st.expander(f"{i}. {rec['topic_label']} — Score: {rec['score']} | Mastery: {rec['mastery']:.1%}", expanded=(i<=3)):
                         st.markdown(f"**Reasoning:** {rec['reasoning']}")
                         st.progress(rec['mastery'])
+            if output['challenging']:
+                st.markdown('---')
+                st.subheader('⚠️ Challenging Topics (proceed with caution)')
+                for rec in output['challenging']:
+                    with st.expander(f"{rec['topic_label']} | Mastery: {rec['mastery']:.1%}"):
+                        st.markdown(f"**Reasoning:** {rec['reasoning']}")
+                        st.progress(rec['mastery'])
             if output['vetoed_sample']:
-                st.markdown('---'); st.subheader('⛔ Sample Vetoed Topics')
+                st.markdown('---'); st.subheader('❌ Sample Vetoed Topics')
                 for rec in output['vetoed_sample']:
                     with st.expander(f"✗ {rec['topic_label']}"):
                         st.markdown(f"**Reason:** {rec['reasoning']}")
+
     with tab2:
+        st.header('🔍 What-If Prerequisite Simulator')
+        st.markdown('Explore how mastering a topic unlocks future learning paths — or what is blocking you from starting it.')
+        nodes_list = list(graph.nodes)
+        labels_list = [graph.nodes[n].get('label',n) for n in nodes_list]
+        selected_label = st.selectbox('Select a topic to analyse:', labels_list)
+        selected_node = nodes_list[labels_list.index(selected_label)]
+        if st.button('🔍 Analyse Topic', type='primary'):
+            result = what_if_analysis(selected_node, graph)
+            col1, col2 = st.columns(2)
+            with col1:
+                st.subheader('🔓 If you master this topic...')
+                if result['direct_unlocks']:
+                    st.markdown(f"**Directly unlocks {len(result['direct_unlocks'])} topic(s):**")
+                    for t in result['direct_unlocks']: st.markdown(f'  → {t}')
+                else:
+                    st.info('This is a terminal topic — it does not unlock further topics in this map.')
+                if result['all_unlocks']:
+                    st.markdown(f"**Total topics eventually unlocked: {result['total_unlocked']}**")
+            with col2:
+                st.subheader('🔒 To start this topic you need...')
+                if result['blocked_by']:
+                    st.markdown('**Prerequisites required:**')
+                    for t in result['blocked_by']: st.markdown(f'  ✓ {t}')
+                else:
+                    st.success('This is a foundational topic — no prerequisites needed. You can start it now!')
+            if result['all_unlocks']:
+                st.markdown('---')
+                st.markdown('**Full learning path unlocked:**')
+                st.markdown(' → '.join([selected_label] + result['all_unlocks'][:8]) + ('...' if len(result['all_unlocks'])>8 else ''))
+
+    with tab3:
         st.header(f'{domain} Knowledge Map')
         st.markdown(f"**{graph.number_of_nodes()} topics** | **{graph.number_of_edges()} prerequisite relationships**")
         rows=[]
@@ -224,13 +322,18 @@ def main():
         longest=nx.dag_longest_path(graph)
         st.markdown('**Longest prerequisite chain:**')
         st.markdown(' → '.join([graph.nodes[n].get('label',n) for n in longest]))
-    with tab3:
+
+    with tab4:
         st.header('System Diagnostics')
         col1,col2=st.columns(2)
         with col1: st.subheader('Model Configuration'); st.json(config)
         with col2:
             st.subheader('DAG Statistics')
             st.json({'domain':domain,'nodes':graph.number_of_nodes(),'edges':graph.number_of_edges(),'is_valid_dag':nx.is_directed_acyclic_graph(graph),'longest_path':len(nx.dag_longest_path(graph))})
+        st.subheader('Constraint Layer')
+        st.markdown(f'**Mastery threshold:** {threshold:.0%} — topics above this are considered mastered')
+        st.markdown(f'**Challenging threshold:** {soft_threshold:.0%} — topics between this and mastery threshold are marked ⚠️ Challenging')
+        st.markdown('**Hard veto:** topics with prerequisites below challenging threshold are fully blocked')
         st.subheader('Domain Switching')
         dcol1,dcol2=st.columns(2)
         with dcol1: st.metric('Math DAG',f'{math_graph.number_of_nodes()} topics')
