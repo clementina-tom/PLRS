@@ -239,16 +239,21 @@ def main():
             seq_length=st.slider('Sequence Length',10,200,50)
             seed=st.number_input('Student Seed',1,1000,42,1)
             np.random.seed(int(seed))
-            sim_skills=np.random.randint(0,config['num_skills'],seq_length).tolist()
-            sim_corrects=np.random.randint(0,2,seq_length).tolist()
-            skill_probs=run_sakt_inference(model,config,sim_skills,sim_corrects,device)
-            mastery_vector=build_mastery_vector(skill_probs,graph,skill_encoder,domain_key,threshold,soft_threshold)
-            st.success(f'SAKT inference complete — {len(skill_probs)} skill predictions generated')
-            real_skills, real_probs, seq_len = get_attention_weights(model,config,sim_skills,sim_corrects,device)
-            if len(real_probs) > 0:
-                st.markdown('**📈 SAKT Mastery Signal (last 10 interactions):**')
-                attn_df = pd.DataFrame({'Interaction Step': [f'Step {seq_len-len(real_probs)+i+1}' for i in range(len(real_probs))], 'Predicted Mastery': [round(float(p),3) for p in real_probs]})
-                st.bar_chart(attn_df.set_index('Interaction Step'))
+            topic_nodes = list(graph.nodes)
+            n_topics    = len(topic_nodes)
+            raw_scores  = np.random.beta(1.5, 3.0, size=n_topics)
+            scale       = min(seq_length / 200.0 * 1.4, 1.0)
+            scores      = np.clip(raw_scores * scale, 0.0, 1.0)
+            for topic_id, score in zip(topic_nodes, scores):
+                mastery_vector.update(topic_id, float(score))
+            mastery_df = pd.DataFrame({
+                'Topic': [graph.nodes[t].get('label', t)[:25] for t in topic_nodes],
+                'Mastery': [round(float(s), 3) for s in scores]
+            }).sort_values('Mastery', ascending=False).head(10)
+            st.markdown('**📈 Simulated Learner Mastery Signal (top 10 topics):**')
+            st.bar_chart(mastery_df.set_index('Topic'))
+            n_mastered = sum(1 for s in scores if s >= threshold)
+            st.success(f'Learner simulation complete — {n_mastered}/{n_topics} topics above mastery threshold')
         if st.button('🚀 Generate Recommendations', type='primary'):
             output=pipeline.run(mastery_vector)
             summary=mastery_vector.get_mastery_summary()
