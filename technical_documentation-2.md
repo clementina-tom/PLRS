@@ -543,7 +543,7 @@ The explainability claim (that reasoning-tagged recommendations are followed mor
 
 ```bibtex
 @misc{logic-engine-2026,
-  author = {[Author Name]},
+  author = {[Clementina Tom]},
   title  = {Logic Engine: A Domain-Agnostic Constraint-Aware 
             Recommendation Framework for Personalized Learning
             Using Deep Knowledge Tracing},
