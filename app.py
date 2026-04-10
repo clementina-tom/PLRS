@@ -120,7 +120,12 @@ class RankingFunction:
         prereqs = list(self.graph.predecessors(topic_id))
         readiness = 1.0 if not prereqs else sum(1 for p in prereqs if mastery_vector.is_mastered(p))/len(prereqs)
         downstream = self._downstream.get(topic_id, 0.0)
-        return round(self.w_gap*gap + self.w_ready*readiness + self.w_downstream*downstream, 3)
+        # Near-mastery boost: topics the student has already started
+        # rank higher than untouched topics with the same gap score
+        near_mastery_boost = 0.0
+        if 0.10 <= current < self.threshold:
+            near_mastery_boost = 0.15 * (current / self.threshold)
+        return round(self.w_gap*gap + self.w_ready*readiness + self.w_downstream*downstream + near_mastery_boost, 3)
 
 class LearningRecommendationPipeline:
     def __init__(self, graph, threshold=0.70, soft_threshold=0.50, top_n=5):
@@ -182,6 +187,54 @@ def what_if_analysis(topic_id, graph):
     all_unlock_labels = [graph.nodes[n].get('label',n) for n in unlocks]
     blocked_labels = [graph.nodes[n].get('label',n) for n in blocked_by]
     return {'direct_unlocks': unlock_labels, 'all_unlocks': all_unlock_labels, 'blocked_by': blocked_labels, 'total_unlocked': len(unlocks)}
+
+def cascade_mastery(mastery_vector, graph):
+    """
+    If a student has high mastery on a topic, infer that their
+    prerequisites are also likely mastered (propagate upward).
+    A student who scores 80% on Modular Arithmetic almost certainly
+    knows Whole Numbers — cascade fills these realistic gaps.
+    """
+    changed = True
+    while changed:
+        changed = False
+        for node in graph.nodes:
+            node_mastery = mastery_vector.get_mastery(node)
+            if node_mastery < 0.40:
+                continue
+            # For each prerequisite of this node
+            for prereq in graph.predecessors(node):
+                prereq_mastery = mastery_vector.get_mastery(prereq)
+                # Infer prerequisite mastery as at least 85% of descendant mastery
+                inferred = min(node_mastery * 0.85, 0.95)
+                if inferred > prereq_mastery:
+                    mastery_vector.update(prereq, inferred)
+                    changed = True
+    return mastery_vector
+
+def cascade_mastery(mastery_vector, graph):
+    """
+    If a student has high mastery on a topic, infer that their
+    prerequisites are also likely mastered (propagate upward).
+    A student who scores 80% on Modular Arithmetic almost certainly
+    knows Whole Numbers — cascade fills these realistic gaps.
+    """
+    changed = True
+    while changed:
+        changed = False
+        for node in graph.nodes:
+            node_mastery = mastery_vector.get_mastery(node)
+            if node_mastery < 0.40:
+                continue
+            # For each prerequisite of this node
+            for prereq in graph.predecessors(node):
+                prereq_mastery = mastery_vector.get_mastery(prereq)
+                # Infer prerequisite mastery as at least 85% of descendant mastery
+                inferred = min(node_mastery * 0.85, 0.95)
+                if inferred > prereq_mastery:
+                    mastery_vector.update(prereq, inferred)
+                    changed = True
+    return mastery_vector
 
 def get_attention_weights(model, config, skill_seq, correct_seq, device):
     max_len=config['max_seq_len']; n_skills=config['num_skills']
@@ -252,7 +305,9 @@ def main():
             }).sort_values('Mastery', ascending=False).head(10)
             st.markdown('**📈 Simulated Learner Mastery Signal (top 10 topics):**')
             st.bar_chart(mastery_df.set_index('Topic'))
-            n_mastered = sum(1 for s in scores if s >= threshold)
+            # Cascade mastery upward through DAG
+            mastery_vector = cascade_mastery(mastery_vector, graph)
+            n_mastered = sum(1 for t in topic_nodes if mastery_vector.is_mastered(t))
             st.success(f'Learner simulation complete — {n_mastered}/{n_topics} topics above mastery threshold')
         if st.button('🚀 Generate Recommendations', type='primary'):
             output=pipeline.run(mastery_vector)
