@@ -6,11 +6,11 @@
 
 ## The Problem Nobody Talks About in Educational AI
 
-Most recommender systems are built to maximize engagement. Netflix recommends what you'll watch next. Spotify recommends what you'll enjoy. Amazon recommends what you'll buy.
+Most recommender systems are built to maximize engagement. For instance Netflix recommends what you'll watch next, Spotify recommends what songs you'll enjoy, Amazon recommends what you'll buy.
 
-Educational recommender systems often copy this playbook. They find students with similar interaction histories and recommend what those students studied next.
+Some educational recommender systems copy this playbook. How? They find students with similar interaction histories and recommend what those students studied next.
 
-There's one catastrophic flaw: **a student who hasn't passed Basic Algebra should not be recommended Advanced Calculus, no matter how many similar students studied it.**
+As harmless as that seems, it has its flaw: **a student with no foundation in Basic Algebra should not be recommended Advanced Calculus, no matter how many similar students studied it.**
 
 This is the **prerequisite trap** — and it's baked into every purely data-driven educational recommender that ignores curriculum structure.
 
@@ -34,7 +34,7 @@ The SAKT model learns *how students learn* — the patterns of success, failure,
 
 ---
 
-## Dataset: OULAD
+## Our Dataset: OULAD
 
 The [Open University Learning Analytics Dataset](https://analyse.kmi.open.ac.uk/open_dataset) contains anonymised data from 32,593 students across 7 courses.
 
@@ -334,7 +334,7 @@ Train and Val AUC track closely throughout — no overfitting.
 
 ## Part 3: Knowledge Maps (DAGs)
 
-The prerequisite constraint layer requires a domain knowledge map. These are manually constructed from official NERDC Nigerian curriculum documents for JSS3–SS2.
+The prerequisite constraint layer requires a domain knowledge map. These were manually constructed from official NERDC Nigerian curriculum documents for JSS3–SS2, the Lagos State Education Commission and other online sources.
 
 ```python
 import json
@@ -685,4 +685,4 @@ If you are using `TransformerEncoder` with both a causal mask and `src_key_paddi
 
 ---
 
-*Built as a Final Year Project in Computer Science. Nigerian curriculum knowledge maps constructed from NERDC scheme of work documents. Trained on Kaggle with T4 GPU.*
+*Built as a Final Year Project in ML track, 3mttxDSNigeria. Nigerian curriculum knowledge maps constructed from NERDC scheme of work documents and online sources. Combined by Gemini Deep Research Tool. Trained on Kaggle with T4 GPU.*
