@@ -16,7 +16,7 @@ A domain-agnostic constraint-aware recommendation framework for personalized lea
 
 ![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)
 
-](https://https://xbo78uswdvbsmsnka87e4j.streamlit.app/#learner-profile)
+](https://https://xbo78uswdvbsmsnka87e4j.streamlit.app/)
 
 ## Tech Stack
 - PyTorch (SAKT model)
